@@ -4,18 +4,25 @@ set -e
 echo "Railway wacli worker booting..."
 echo "Current user: $(whoami)"
 echo "Current directory: $(pwd)"
+echo "WACLI_STORE_DIR=${WACLI_STORE_DIR:-not set}"
+echo "RAILWAY_VOLUME_NAME=${RAILWAY_VOLUME_NAME:-not set}"
+echo "RAILWAY_VOLUME_MOUNT_PATH=${RAILWAY_VOLUME_MOUNT_PATH:-not set}"
 
-mkdir -p /data/wacli
+mkdir -p "${WACLI_STORE_DIR:-/data/wacli}"
 
 echo "Testing persistent volume..."
-date >> /data/wacli/boot-log.txt
-cat /data/wacli/boot-log.txt
+date >> "${WACLI_STORE_DIR:-/data/wacli}/boot-log.txt"
+cat "${WACLI_STORE_DIR:-/data/wacli}/boot-log.txt"
 
-echo "Listing /data:"
-ls -lah /data
-ls -lah /data/wacli
+echo "Checking wacli install..."
+which wacli
+wacli --version
+wacli --help | head -40
 
-echo "Worker is alive. Sleeping forever for first deployment test."
+echo "Listing wacli store:"
+ls -lah "${WACLI_STORE_DIR:-/data/wacli}"
+
+echo "Worker is alive. Sleeping forever for install test."
 
 while true; do
   echo "Still alive at $(date)"
