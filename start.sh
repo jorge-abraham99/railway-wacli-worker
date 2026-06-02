@@ -16,6 +16,6 @@ echo "Open WhatsApp → Settings → Linked devices → Link a device"
 echo "Then scan the QR/pairing output below."
 
 wacli auth \
-  --qr-format text \
+  --qr-format terminal \
   --follow \
   --download-media=false
