@@ -8,14 +8,18 @@ echo "RAILWAY_VOLUME_MOUNT_PATH=${RAILWAY_VOLUME_MOUNT_PATH:-not set}"
 
 mkdir -p "${WACLI_STORE_DIR:-/data/wacli}"
 
+echo "Checking wacli version..."
+wacli --version
+
 echo "Checking auth status..."
 wacli auth status || true
 
-echo "Starting WhatsApp auth..."
-echo "Open WhatsApp → Settings → Linked devices → Link a device"
-echo "Then scan the QR/pairing output below."
+echo "Listing wacli store:"
+ls -lah "${WACLI_STORE_DIR:-/data/wacli}"
 
-wacli auth \
-  --phone "447756952995" \
+echo "Starting continuous WhatsApp sync..."
+wacli sync \
   --follow \
-  --download-media=false
+  --download-media=false \
+  --max-db-size "${WACLI_MAX_DB_SIZE:-2GB}" \
+  --events
