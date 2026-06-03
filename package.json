@@ -5,6 +5,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "latest",
-    "fastify": "latest"
+    "fastify": "latest",
+    "ws": "latest"
   }
 }

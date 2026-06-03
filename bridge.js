@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import crypto from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
+import ws from 'ws';
 
 const app = Fastify({
   logger: true,
@@ -14,6 +15,9 @@ const supabase = createClient(
     auth: {
       persistSession: false,
       autoRefreshToken: false,
+    },
+    realtime: {
+      transport: ws,
     },
   }
 );
