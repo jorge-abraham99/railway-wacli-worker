@@ -233,6 +233,32 @@ app.post('/wacli', async (request, reply) => {
     });
   }
 
+  const { error: chatError } = await supabase
+    .from('wa_chats')
+    .upsert(
+      {
+        account_key: ACCOUNT_KEY,
+        chat_jid: message.chat_jid,
+        chat_name: message.chat_name,
+        last_message_ts: message.message_ts,
+        last_message_at: message.message_at,
+        raw: message.raw,
+        updated_at: new Date().toISOString(),
+      },
+      {
+        onConflict: 'account_key,chat_jid',
+      }
+    );
+
+  if (chatError) {
+    request.log.error({ error: chatError }, 'Failed to upsert chat');
+
+    return reply.code(500).send({
+      ok: false,
+      error: chatError.message,
+    });
+  }
+
   const { error } = await supabase
     .from('wa_messages')
     .upsert(message, {
