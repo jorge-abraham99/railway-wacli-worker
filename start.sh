@@ -14,29 +14,26 @@ wacli --version
 echo "Checking auth status..."
 wacli auth status || true
 
-echo "Listing wacli store:"
-ls -lah "${WACLI_STORE_DIR:-/data/wacli}"
+echo "Starting Node bridge..."
+node /app/bridge.js &
+BRIDGE_PID=$!
 
-echo "SQLite tables:"
-sqlite3 "${WACLI_STORE_DIR:-/data/wacli}/wacli.db" ".tables" || true
+sleep 3
 
-echo "Messages schema:"
-sqlite3 "${WACLI_STORE_DIR:-/data/wacli}/wacli.db" "pragma table_info(messages);" || true
+echo "Checking bridge health..."
+curl -fsS "http://localhost:${PORT:-8787}/health" || {
+  echo "Bridge failed health check"
+  exit 1
+}
 
-echo "Chats schema:"
-sqlite3 "${WACLI_STORE_DIR:-/data/wacli}/wacli.db" "pragma table_info(chats);" || true
+echo "Starting continuous WhatsApp sync with webhook..."
+wacli sync \
+  --follow \
+  --download-media=false \
+  --max-db-size "${WACLI_MAX_DB_SIZE:-2GB}" \
+  --webhook "http://localhost:${PORT:-8787}/wacli" \
+  --webhook-secret "$WACLI_WEBHOOK_SECRET" \
+  --webhook-allow-private \
+  --events
 
-echo "Recent messages raw preview:"
-sqlite3 "${WACLI_STORE_DIR:-/data/wacli}/wacli.db" \
-  "select * from messages order by rowid desc limit 1;" || true
-
-echo "Recent messages selected fields:"
-sqlite3 "${WACLI_STORE_DIR:-/data/wacli}/wacli.db" \
-  "select rowid, chat_jid, msg_id, sender_jid, sender_name, ts, substr(display_text, 1, 120) from messages order by rowid desc limit 10;" || true
-
-echo "Inspection complete. Sleeping so logs stay visible."
-
-while true; do
-  echo "Still alive at $(date)"
-  sleep 60
-done
+wait $BRIDGE_PID
