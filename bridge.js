@@ -185,7 +185,14 @@ app.post('/wacli', async (request, reply) => {
 
   if (!message.chat_jid || !message.msg_id) {
     request.log.warn(
-      { payload: request.body },
+      {
+        payload_type: Array.isArray(request.body) ? 'array' : typeof request.body,
+        payload_keys:
+          request.body && typeof request.body === 'object' && !Array.isArray(request.body)
+            ? Object.keys(request.body)
+            : null,
+        payload_preview: JSON.stringify(request.body).slice(0, 2000),
+      },
       'Skipping payload without chat_jid or msg_id'
     );
 
