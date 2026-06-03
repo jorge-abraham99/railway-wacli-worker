@@ -74,6 +74,7 @@ function normalizeWebhook(payload) {
   const chatJid = firstDefined(
     p.chat_jid,
     p.chatJid,
+    p.Chat,
     p.chat,
     p.remote_jid,
     p.remoteJid
@@ -83,15 +84,42 @@ function normalizeWebhook(payload) {
     p.msg_id,
     p.message_id,
     p.messageId,
+    p.ID,
+    p.Id,
     p.id
+  );
+
+  const senderJid = firstDefined(
+    p.sender_jid,
+    p.senderJid,
+    p.SenderJID,
+    p.sender
+  );
+
+  const senderName = firstDefined(
+    p.sender_name,
+    p.senderName,
+    p.PushName,
+    p.push_name,
+    p.pushName
   );
 
   const ts = firstDefined(
     p.ts,
     p.timestamp,
+    p.Timestamp,
     p.message_timestamp,
     p.messageTimestamp
   );
+
+  const text = firstDefined(
+    p.text,
+    p.Text,
+    p.body,
+    p.Body
+  );
+
+  const media = p.Media || p.media || null;
 
   return {
     account_key: ACCOUNT_KEY,
@@ -99,52 +127,54 @@ function normalizeWebhook(payload) {
     sqlite_rowid: firstDefined(p.rowid, p.sqlite_rowid),
 
     chat_jid: chatJid,
-    chat_name: firstDefined(p.chat_name, p.chatName),
+    chat_name: firstDefined(p.chat_name, p.chatName, p.ChatName),
 
     msg_id: msgId,
 
-    sender_jid: firstDefined(p.sender_jid, p.senderJid, p.sender),
-    sender_name: firstDefined(
-      p.sender_name,
-      p.senderName,
-      p.push_name,
-      p.pushName
-    ),
+    sender_jid: senderJid,
+    sender_name: senderName,
 
-    from_me: boolValue(firstDefined(p.from_me, p.fromMe, false)),
+    from_me: boolValue(firstDefined(p.from_me, p.fromMe, p.FromMe, false)),
 
     message_ts: ts ? Number(ts) : null,
     message_at: timestampToIso(ts),
 
-    text: firstDefined(p.text, p.body),
+    text,
     display_text: firstDefined(
       p.display_text,
       p.displayText,
+      p.Text,
       p.text,
+      p.Body,
       p.body,
-      p.caption
+      p.Media?.Caption,
+      p.media?.caption
     ),
 
-    quoted_msg_id: firstDefined(p.quoted_msg_id, p.quotedMsgId),
-    quoted_sender_jid: firstDefined(p.quoted_sender_jid, p.quotedSenderJid),
+    quoted_msg_id: firstDefined(p.quoted_msg_id, p.quotedMsgId, p.ReplyToID),
+    quoted_sender_jid: firstDefined(
+      p.quoted_sender_jid,
+      p.quotedSenderJid,
+      p.ReplyToSenderJID
+    ),
 
-    is_forwarded: boolValue(firstDefined(p.is_forwarded, p.isForwarded, false)),
-    forwarding_score: Number(firstDefined(p.forwarding_score, p.forwardingScore, 0)),
+    is_forwarded: boolValue(firstDefined(p.is_forwarded, p.isForwarded, p.IsForwarded, false)),
+    forwarding_score: Number(firstDefined(p.forwarding_score, p.forwardingScore, p.ForwardingScore, 0)),
 
-    reaction_to_id: firstDefined(p.reaction_to_id, p.reactionToId),
-    reaction_emoji: firstDefined(p.reaction_emoji, p.reactionEmoji),
+    reaction_to_id: firstDefined(p.reaction_to_id, p.reactionToId, p.ReactionToID),
+    reaction_emoji: firstDefined(p.reaction_emoji, p.reactionEmoji, p.ReactionEmoji),
 
-    media_type: firstDefined(p.media_type, p.mediaType),
-    media_caption: firstDefined(p.media_caption, p.mediaCaption),
-    filename: firstDefined(p.filename, p.file_name, p.fileName),
-    mime_type: firstDefined(p.mime_type, p.mimeType),
-    local_path: firstDefined(p.local_path, p.localPath),
-    downloaded_at: firstDefined(p.downloaded_at, p.downloadedAt),
+    media_type: firstDefined(p.media_type, p.mediaType, media?.Type),
+    media_caption: firstDefined(p.media_caption, p.mediaCaption, media?.Caption),
+    filename: firstDefined(p.filename, p.file_name, p.fileName, media?.Filename),
+    mime_type: firstDefined(p.mime_type, p.mimeType, media?.MIMEType),
+    local_path: firstDefined(p.local_path, p.localPath, media?.LocalPath),
+    downloaded_at: firstDefined(p.downloaded_at, p.downloadedAt, media?.DownloadedAt),
 
-    revoked: boolValue(firstDefined(p.revoked, false)),
+    revoked: boolValue(firstDefined(p.revoked, p.Revoked, false)),
     deleted_for_me: boolValue(firstDefined(p.deleted_for_me, p.deletedForMe, false)),
-    edited: boolValue(firstDefined(p.edited, false)),
-    edited_ts: Number(firstDefined(p.edited_ts, p.editedTs, 0)),
+    edited: boolValue(firstDefined(p.edited, p.Edited, false)),
+    edited_ts: Number(firstDefined(p.edited_ts, p.editedTs, p.EditedTimestamp, 0)),
 
     raw: payload,
   };
