@@ -30,3 +30,11 @@ wacli sync \
   --download-media=false \
   --max-db-size "${WACLI_MAX_DB_SIZE:-2GB}" \
   --events
+  
+echo "Messages schema:"
+sqlite3 "${WACLI_STORE_DIR:-/data/wacli}/wacli.db" \
+  "pragma table_info(messages);" || true
+
+echo "Recent messages:"
+sqlite3 "${WACLI_STORE_DIR:-/data/wacli}/wacli.db" \
+  "select rowid, datetime(ts, 'unixepoch') as message_time, chat_jid, sender_jid, sender_name, substr(display_text, 1, 80) from messages order by rowid desc limit 10;" || true  
