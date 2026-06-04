@@ -1,7 +1,8 @@
 {
   "type": "module",
   "scripts": {
-    "start": "node bridge.js"
+    "start": "node bridge.js",
+    "start:worker": "node worker.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "latest",
