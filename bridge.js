@@ -34,14 +34,45 @@ function boolValue(value) {
   return false;
 }
 
-function timestampToIso(ts) {
-  if (!ts) return null;
+function nullableNumber(value) {
+  if (value === undefined || value === null || value === '') return null;
 
-  const n = Number(ts);
-  if (!Number.isFinite(n)) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
 
-  const ms = n < 10_000_000_000 ? n * 1000 : n;
-  return new Date(ms).toISOString();
+function timestampToIso(value) {
+  if (value === undefined || value === null || value === '') return null;
+
+  if (typeof value === 'string' && value.trim() !== '' && Number.isNaN(Number(value))) {
+    const parsed = new Date(value);
+    return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+  }
+
+  const n = nullableNumber(value);
+  if (n === null) return null;
+
+  const ms = Math.abs(n) < 10_000_000_000 ? n * 1000 : n;
+  const parsed = new Date(ms);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+}
+
+function supabaseErrorDetails(error) {
+  if (!error) return null;
+
+  return {
+    message: error.message,
+    code: error.code,
+    details: error.details,
+    hint: error.hint,
+  };
+}
+
+function isMissingConflictConstraint(error) {
+  return (
+    error?.code === '42P10' ||
+    /no unique or exclusion constraint/i.test(error?.message || '')
+  );
 }
 
 function verifySignature(rawBody, signatureHeader) {
@@ -136,7 +167,7 @@ function normalizeWebhook(payload) {
 
     from_me: boolValue(firstDefined(p.from_me, p.fromMe, p.FromMe, false)),
 
-    message_ts: ts ? Number(ts) : null,
+    message_ts: nullableNumber(ts),
     message_at: timestampToIso(ts),
 
     text,
@@ -159,7 +190,7 @@ function normalizeWebhook(payload) {
     ),
 
     is_forwarded: boolValue(firstDefined(p.is_forwarded, p.isForwarded, p.IsForwarded, false)),
-    forwarding_score: Number(firstDefined(p.forwarding_score, p.forwardingScore, p.ForwardingScore, 0)),
+    forwarding_score: nullableNumber(firstDefined(p.forwarding_score, p.forwardingScore, p.ForwardingScore, 0)) || 0,
 
     reaction_to_id: firstDefined(p.reaction_to_id, p.reactionToId, p.ReactionToID),
     reaction_emoji: firstDefined(p.reaction_emoji, p.reactionEmoji, p.ReactionEmoji),
@@ -169,15 +200,58 @@ function normalizeWebhook(payload) {
     filename: firstDefined(p.filename, p.file_name, p.fileName, media?.Filename),
     mime_type: firstDefined(p.mime_type, p.mimeType, media?.MIMEType),
     local_path: firstDefined(p.local_path, p.localPath, media?.LocalPath),
-    downloaded_at: firstDefined(p.downloaded_at, p.downloadedAt, media?.DownloadedAt),
+    downloaded_at: timestampToIso(firstDefined(p.downloaded_at, p.downloadedAt, media?.DownloadedAt)),
 
     revoked: boolValue(firstDefined(p.revoked, p.Revoked, false)),
     deleted_for_me: boolValue(firstDefined(p.deleted_for_me, p.deletedForMe, false)),
     edited: boolValue(firstDefined(p.edited, p.Edited, false)),
-    edited_ts: Number(firstDefined(p.edited_ts, p.editedTs, p.EditedTimestamp, 0)),
+    edited_ts: nullableNumber(firstDefined(p.edited_ts, p.editedTs, p.EditedTimestamp, 0)) || 0,
 
     raw: payload,
   };
+}
+
+async function upsertMessage(message) {
+  const upsertResult = await supabase
+    .from('wa_messages')
+    .upsert(message, {
+      onConflict: 'account_key,chat_jid,msg_id',
+    });
+
+  if (!upsertResult.error || !isMissingConflictConstraint(upsertResult.error)) {
+    return upsertResult;
+  }
+
+  const { data: existingMessage, error: selectError } = await supabase
+    .from('wa_messages')
+    .select('id')
+    .eq('account_key', message.account_key)
+    .eq('chat_jid', message.chat_jid)
+    .eq('msg_id', message.msg_id)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (selectError) {
+    return {
+      error: {
+        ...selectError,
+        message: `message conflict fallback select failed after upsert failed: ${selectError.message}`,
+        details: supabaseErrorDetails(upsertResult.error),
+      },
+    };
+  }
+
+  if (existingMessage?.id) {
+    return supabase
+      .from('wa_messages')
+      .update(message)
+      .eq('id', existingMessage.id);
+  }
+
+  return supabase
+    .from('wa_messages')
+    .insert(message);
 }
 
 app.addContentTypeParser(
@@ -251,7 +325,7 @@ app.post('/wacli', async (request, reply) => {
     );
 
   if (chatError) {
-    request.log.error({ error: chatError }, 'Failed to upsert chat');
+    request.log.error({ error: supabaseErrorDetails(chatError) }, 'Failed to upsert chat');
 
     return reply.code(500).send({
       ok: false,
@@ -259,14 +333,17 @@ app.post('/wacli', async (request, reply) => {
     });
   }
 
-  const { error } = await supabase
-    .from('wa_messages')
-    .upsert(message, {
-      onConflict: 'account_key,chat_jid,msg_id',
-    });
+  const { error } = await upsertMessage(message);
 
   if (error) {
-    request.log.error({ error }, 'Failed to upsert message');
+    request.log.error(
+      {
+        error: supabaseErrorDetails(error),
+        chat_jid: message.chat_jid,
+        msg_id: message.msg_id,
+      },
+      'Failed to upsert message'
+    );
 
     return reply.code(500).send({
       ok: false,
