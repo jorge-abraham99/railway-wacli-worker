@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import ws from 'ws';
+import { promoteExtractions } from './promote-extractions.js';
 
 const SYSTEM_PROMPT = `You are an information extraction engine for commercial logistics WhatsApp conversations.
 
@@ -149,6 +150,7 @@ async function main() {
   while (true) {
     const cycleStartedAt = new Date();
     const summary = await runCycle(cycleStartedAt);
+    await runPromotionStep();
 
     console.log(JSON.stringify({
       level: 'info',
@@ -158,6 +160,21 @@ async function main() {
     }));
 
     await sleep(WORKER_INTERVAL_SECONDS * 1000);
+  }
+}
+
+async function runPromotionStep() {
+  try {
+    await promoteExtractions({
+      supabase,
+      dryRun: DRY_RUN,
+    });
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: 'error',
+      step: 'promote_extractions_failed',
+      error: error.message,
+    }));
   }
 }
 
