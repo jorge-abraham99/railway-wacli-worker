@@ -1,87 +1,22 @@
 import Fastify from 'fastify';
 import crypto from 'node:crypto';
-import { createClient } from '@supabase/supabase-js';
-import ws from 'ws';
+import {
+  createSupabaseClient,
+  getAccountKey,
+  normalizeWebhook,
+  supabaseErrorFields,
+  upsertChat,
+  upsertMessage,
+} from './wa-ingest.js';
 
 const app = Fastify({
   logger: true,
   bodyLimit: 20 * 1024 * 1024,
 });
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-    },
-    realtime: {
-      transport: ws,
-    },
-  }
-);
-
-const ACCOUNT_KEY = process.env.WACLI_ACCOUNT_KEY || 'default';
+const supabase = createSupabaseClient();
+const ACCOUNT_KEY = getAccountKey();
 const WEBHOOK_SECRET = process.env.WACLI_WEBHOOK_SECRET || '';
-
-function firstDefined(...values) {
-  return values.find((value) => value !== undefined && value !== null && value !== '');
-}
-
-function boolValue(value) {
-  if (value === true || value === 1 || value === '1') return true;
-  return false;
-}
-
-function nullableNumber(value) {
-  if (value === undefined || value === null || value === '') return null;
-
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function timestampToIso(ts) {
-  if (!ts) return null;
-
-  if (typeof ts === 'string') {
-    const parsed = new Date(ts);
-    if (!Number.isNaN(parsed.getTime())) {
-      return parsed.toISOString();
-    }
-  }
-
-  const n = Number(ts);
-  if (!Number.isFinite(n)) return null;
-
-  const ms = n < 10_000_000_000 ? n * 1000 : n;
-  return new Date(ms).toISOString();
-}
-
-function timestampToNumber(ts) {
-  if (!ts) return null;
-
-  if (typeof ts === 'number') return ts;
-
-  if (typeof ts === 'string') {
-    const asNumber = Number(ts);
-    if (Number.isFinite(asNumber)) return asNumber;
-
-    const parsed = new Date(ts);
-    if (!Number.isNaN(parsed.getTime())) {
-      return Math.floor(parsed.getTime() / 1000);
-    }
-  }
-
-  return null;
-}
-
-function isMissingConflictConstraint(error) {
-  return (
-    error?.code === '42P10' ||
-    /no unique or exclusion constraint/i.test(error?.message || '')
-  );
-}
 
 function verifySignature(rawBody, signatureHeader) {
   if (!WEBHOOK_SECRET) return true;
@@ -105,161 +40,6 @@ function verifySignature(rawBody, signatureHeader) {
   } catch {
     return false;
   }
-}
-
-function normalizeWebhook(payload) {
-  const p = payload.message || payload.data || payload;
-
-  const chatJid = firstDefined(
-    p.chat_jid,
-    p.chatJid,
-    p.Chat,
-    p.chat,
-    p.remote_jid,
-    p.remoteJid
-  );
-
-  const msgId = firstDefined(
-    p.msg_id,
-    p.message_id,
-    p.messageId,
-    p.ID,
-    p.Id,
-    p.id
-  );
-
-  const senderJid = firstDefined(
-    p.sender_jid,
-    p.senderJid,
-    p.SenderJID,
-    p.sender
-  );
-
-  const senderName = firstDefined(
-    p.sender_name,
-    p.senderName,
-    p.PushName,
-    p.push_name,
-    p.pushName
-  );
-
-  const ts = firstDefined(
-    p.ts,
-    p.timestamp,
-    p.Timestamp,
-    p.message_timestamp,
-    p.messageTimestamp
-  );
-
-  const text = firstDefined(
-    p.text,
-    p.Text,
-    p.body,
-    p.Body
-  );
-
-  const media = p.Media || p.media || null;
-
-  return {
-    account_key: ACCOUNT_KEY,
-
-    sqlite_rowid: firstDefined(p.rowid, p.sqlite_rowid),
-
-    chat_jid: chatJid,
-    chat_name: firstDefined(p.chat_name, p.chatName, p.ChatName),
-
-    msg_id: msgId,
-
-    sender_jid: senderJid,
-    sender_name: senderName,
-
-    from_me: boolValue(firstDefined(p.from_me, p.fromMe, p.FromMe, false)),
-
-    message_ts: timestampToNumber(ts),
-    message_at: timestampToIso(ts),
-
-    text,
-    display_text: firstDefined(
-      p.display_text,
-      p.displayText,
-      p.Text,
-      p.text,
-      p.Body,
-      p.body,
-      p.Media?.Caption,
-      p.media?.caption
-    ),
-
-    quoted_msg_id: firstDefined(p.quoted_msg_id, p.quotedMsgId, p.ReplyToID),
-    quoted_sender_jid: firstDefined(
-      p.quoted_sender_jid,
-      p.quotedSenderJid,
-      p.ReplyToSenderJID
-    ),
-
-    is_forwarded: boolValue(firstDefined(p.is_forwarded, p.isForwarded, p.IsForwarded, false)),
-    forwarding_score: nullableNumber(firstDefined(p.forwarding_score, p.forwardingScore, p.ForwardingScore, 0)) || 0,
-
-    reaction_to_id: firstDefined(p.reaction_to_id, p.reactionToId, p.ReactionToID),
-    reaction_emoji: firstDefined(p.reaction_emoji, p.reactionEmoji, p.ReactionEmoji),
-
-    media_type: firstDefined(p.media_type, p.mediaType, media?.Type),
-    media_caption: firstDefined(p.media_caption, p.mediaCaption, media?.Caption),
-    filename: firstDefined(p.filename, p.file_name, p.fileName, media?.Filename),
-    mime_type: firstDefined(p.mime_type, p.mimeType, media?.MIMEType),
-    local_path: firstDefined(p.local_path, p.localPath, media?.LocalPath),
-    downloaded_at: timestampToIso(firstDefined(p.downloaded_at, p.downloadedAt, media?.DownloadedAt)),
-
-    revoked: boolValue(firstDefined(p.revoked, p.Revoked, false)),
-    deleted_for_me: boolValue(firstDefined(p.deleted_for_me, p.deletedForMe, false)),
-    edited: boolValue(firstDefined(p.edited, p.Edited, false)),
-    edited_ts: nullableNumber(firstDefined(p.edited_ts, p.editedTs, p.EditedTimestamp, 0)) || 0,
-
-    raw: payload,
-  };
-}
-
-async function upsertMessage(message) {
-  const upsertResult = await supabase
-    .from('wa_messages')
-    .upsert(message, {
-      onConflict: 'account_key,chat_jid,msg_id',
-    });
-
-  if (!upsertResult.error || !isMissingConflictConstraint(upsertResult.error)) {
-    return upsertResult;
-  }
-
-  const { data: existingMessage, error: selectError } = await supabase
-    .from('wa_messages')
-    .select('id')
-    .eq('account_key', message.account_key)
-    .eq('chat_jid', message.chat_jid)
-    .eq('msg_id', message.msg_id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (selectError) {
-    return {
-      error: {
-        ...selectError,
-        message: `message conflict fallback select failed after upsert failed: ${selectError.message}`,
-        details: supabaseErrorDetails(upsertResult.error),
-      },
-    };
-  }
-
-  if (existingMessage?.id) {
-    return supabase
-      .from('wa_messages')
-      .update(message)
-      .eq('id', existingMessage.id);
-  }
-
-  return supabase
-    .from('wa_messages')
-    .insert(message);
 }
 
 app.addContentTypeParser(
@@ -293,7 +73,7 @@ app.post('/wacli', async (request, reply) => {
     });
   }
 
-  const message = normalizeWebhook(request.body);
+  const message = normalizeWebhook(request.body, ACCOUNT_KEY);
 
   if (!message.chat_jid || !message.msg_id) {
     request.log.warn(
@@ -315,32 +95,11 @@ app.post('/wacli', async (request, reply) => {
     });
   }
 
-  const { error: chatError } = await supabase
-    .from('wa_chats')
-    .upsert(
-      {
-        account_key: ACCOUNT_KEY,
-        chat_jid: message.chat_jid,
-        chat_name: message.chat_name,
-        last_message_ts: message.message_ts,
-        last_message_at: message.message_at,
-        raw: message.raw,
-        updated_at: new Date().toISOString(),
-      },
-      {
-        onConflict: 'account_key,chat_jid',
-      }
-    );
+  const { error: chatError } = await upsertChat(supabase, message);
 
   if (chatError) {
     request.log.error(
-      {
-        supabase_error_message: chatError.message,
-        supabase_error_code: chatError.code,
-        supabase_error_details: chatError.details,
-        supabase_error_hint: chatError.hint,
-        normalized_message: message,
-      },
+      supabaseErrorFields(chatError, message),
       'Failed to upsert chat'
     );
 
@@ -350,17 +109,11 @@ app.post('/wacli', async (request, reply) => {
     });
   }
 
-  const { error } = await upsertMessage(message);
+  const { error } = await upsertMessage(supabase, message);
 
   if (error) {
     request.log.error(
-      {
-        supabase_error_message: error.message,
-        supabase_error_code: error.code,
-        supabase_error_details: error.details,
-        supabase_error_hint: error.hint,
-        normalized_message: message,
-      },
+      supabaseErrorFields(error, message),
       'Failed to upsert message'
     );
 

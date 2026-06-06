@@ -3,7 +3,8 @@
   "scripts": {
     "start": "node bridge.js",
     "start:worker": "node worker.js",
-    "promote:extractions": "node promote-extractions.js"
+    "promote:extractions": "node promote-extractions.js",
+    "replay:messages": "node replay-missed-messages.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "latest",

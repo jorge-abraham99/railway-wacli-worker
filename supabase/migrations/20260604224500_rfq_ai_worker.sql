@@ -91,6 +91,7 @@ create index if not exists rfq_extractions_json_gin_idx
 create or replace function ai.mark_ai_chat_dirty()
 returns trigger
 language plpgsql
+security definer
 set search_path = ''
 as $$
 begin
@@ -131,6 +132,8 @@ begin
   return new;
 end;
 $$;
+
+revoke all on function ai.mark_ai_chat_dirty() from public, anon, authenticated;
 
 drop trigger if exists trg_mark_ai_chat_dirty on public.wa_messages;
 
