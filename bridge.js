@@ -41,31 +41,39 @@ function nullableNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function timestampToIso(value) {
-  if (value === undefined || value === null || value === '') return null;
+function timestampToIso(ts) {
+  if (!ts) return null;
 
-  if (typeof value === 'string' && value.trim() !== '' && Number.isNaN(Number(value))) {
-    const parsed = new Date(value);
-    return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+  if (typeof ts === 'string') {
+    const parsed = new Date(ts);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString();
+    }
   }
 
-  const n = nullableNumber(value);
-  if (n === null) return null;
+  const n = Number(ts);
+  if (!Number.isFinite(n)) return null;
 
-  const ms = Math.abs(n) < 10_000_000_000 ? n * 1000 : n;
-  const parsed = new Date(ms);
-  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+  const ms = n < 10_000_000_000 ? n * 1000 : n;
+  return new Date(ms).toISOString();
 }
 
-function supabaseErrorDetails(error) {
-  if (!error) return null;
+function timestampToNumber(ts) {
+  if (!ts) return null;
 
-  return {
-    message: error.message,
-    code: error.code,
-    details: error.details,
-    hint: error.hint,
-  };
+  if (typeof ts === 'number') return ts;
+
+  if (typeof ts === 'string') {
+    const asNumber = Number(ts);
+    if (Number.isFinite(asNumber)) return asNumber;
+
+    const parsed = new Date(ts);
+    if (!Number.isNaN(parsed.getTime())) {
+      return Math.floor(parsed.getTime() / 1000);
+    }
+  }
+
+  return null;
 }
 
 function isMissingConflictConstraint(error) {
@@ -167,7 +175,7 @@ function normalizeWebhook(payload) {
 
     from_me: boolValue(firstDefined(p.from_me, p.fromMe, p.FromMe, false)),
 
-    message_ts: nullableNumber(ts),
+    message_ts: timestampToNumber(ts),
     message_at: timestampToIso(ts),
 
     text,
@@ -325,7 +333,16 @@ app.post('/wacli', async (request, reply) => {
     );
 
   if (chatError) {
-    request.log.error({ error: supabaseErrorDetails(chatError) }, 'Failed to upsert chat');
+    request.log.error(
+      {
+        supabase_error_message: chatError.message,
+        supabase_error_code: chatError.code,
+        supabase_error_details: chatError.details,
+        supabase_error_hint: chatError.hint,
+        normalized_message: message,
+      },
+      'Failed to upsert chat'
+    );
 
     return reply.code(500).send({
       ok: false,
@@ -338,9 +355,11 @@ app.post('/wacli', async (request, reply) => {
   if (error) {
     request.log.error(
       {
-        error: supabaseErrorDetails(error),
-        chat_jid: message.chat_jid,
-        msg_id: message.msg_id,
+        supabase_error_message: error.message,
+        supabase_error_code: error.code,
+        supabase_error_details: error.details,
+        supabase_error_hint: error.hint,
+        normalized_message: message,
       },
       'Failed to upsert message'
     );

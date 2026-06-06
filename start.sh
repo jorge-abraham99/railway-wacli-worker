@@ -2,6 +2,7 @@
 set -e
 
 echo "Railway wacli worker booting..."
+echo "INGESTOR_BUILD_VERSION=debug-upsert-2026-06-04-1"
 echo "WACLI_STORE_DIR=${WACLI_STORE_DIR:-not set}"
 echo "RAILWAY_VOLUME_NAME=${RAILWAY_VOLUME_NAME:-not set}"
 echo "RAILWAY_VOLUME_MOUNT_PATH=${RAILWAY_VOLUME_MOUNT_PATH:-not set}"
