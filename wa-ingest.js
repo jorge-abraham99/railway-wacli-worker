@@ -160,7 +160,7 @@ export function normalizeWebhook(payload, accountKey = getAccountKey()) {
 
 export function normalizeStoredMessageRow(row, accountKey = getAccountKey()) {
   const ts = firstDefined(row.message_ts, row.ts, row.message_at);
-  const raw = parseJsonObject(row.raw);
+  const raw = parseJsonObject(row.raw) || buildStoredRawPayload(row, ts);
 
   return {
     account_key: accountKey,
@@ -284,6 +284,41 @@ function parseJsonObject(value) {
   } catch {
     return null;
   }
+}
+
+function buildStoredRawPayload(row, ts) {
+  return {
+    source: 'wacli.db.replay',
+    rowid: nullableNumber(row.sqlite_rowid),
+    Chat: firstDefined(row.chat_jid),
+    ChatName: firstDefined(row.chat_name),
+    ID: firstDefined(row.msg_id),
+    SenderJID: firstDefined(row.sender_jid),
+    PushName: firstDefined(row.sender_name),
+    Timestamp: timestampToIso(ts),
+    FromMe: boolValue(row.from_me),
+    Text: firstDefined(row.text),
+    DisplayText: firstDefined(row.display_text, row.text, row.media_caption),
+    ReplyToID: firstDefined(row.quoted_msg_id),
+    ReplyToSenderJID: firstDefined(row.quoted_sender_jid),
+    IsForwarded: boolValue(row.is_forwarded),
+    ForwardingScore: nullableNumber(row.forwarding_score) || 0,
+    ReactionToID: firstDefined(row.reaction_to_id),
+    ReactionEmoji: firstDefined(row.reaction_emoji),
+    Media: firstDefined(row.media_type, row.media_caption, row.filename, row.mime_type, row.local_path)
+      ? {
+          Type: firstDefined(row.media_type),
+          Caption: firstDefined(row.media_caption),
+          Filename: firstDefined(row.filename),
+          MIMEType: firstDefined(row.mime_type),
+          LocalPath: firstDefined(row.local_path, row.direct_path),
+        }
+      : null,
+    Revoked: boolValue(row.revoked),
+    DeletedForMe: boolValue(row.deleted_for_me),
+    Edited: boolValue(row.edited),
+    EditedTimestamp: nullableNumber(row.edited_ts) || 0,
+  };
 }
 
 function isMissingConflictConstraint(error) {
