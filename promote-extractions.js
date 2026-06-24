@@ -4,6 +4,12 @@ import ws from 'ws';
 
 const DEFAULT_LIMIT = 50;
 const DEFAULT_MIN_CONFIDENCE = 0.85;
+const DEFAULT_OPPORTUNITY_DEDUPE_WINDOW_HOURS = 72;
+const RECENT_OPPORTUNITY_WINDOW_HOURS = intEnv(
+  'OPPORTUNITY_DEDUPE_WINDOW_HOURS',
+  DEFAULT_OPPORTUNITY_DEDUPE_WINDOW_HOURS,
+);
+const ACTIVE_OPPORTUNITY_STATUSES = ['new', 'needs_review'];
 
 export async function promoteExtractions(options = {}) {
   const supabase = options.supabase || createSupabaseClient();
@@ -25,8 +31,8 @@ export async function promoteExtractions(options = {}) {
 
   for (const extraction of candidates) {
     try {
-      const existingOpportunity = await findExistingOpportunity(supabase, extraction.id);
       const sourceMessages = await fetchSourceMessages(supabase, extraction.source_message_ids);
+      const existingOpportunity = await findExistingOpportunity(supabase, extraction, sourceMessages);
       const shouldMarkNeedsReview = shouldMoveToNeedsReview(extraction, minConfidence);
       const opportunity = buildOpportunityPayload(extraction, {
         existingOpportunity,
@@ -39,13 +45,17 @@ export async function promoteExtractions(options = {}) {
         continue;
       }
 
+      let promotedOpportunityId;
       if (existingOpportunity) {
         await updateOpportunity(supabase, existingOpportunity.id, opportunity);
+        promotedOpportunityId = existingOpportunity.id;
         summary.updated += 1;
       } else {
-        await insertOpportunity(supabase, opportunity);
+        promotedOpportunityId = await insertOpportunity(supabase, opportunity);
         summary.inserted += 1;
       }
+
+      await markExtractionPromoted(supabase, extraction.id, promotedOpportunityId);
 
       if (shouldMarkNeedsReview) {
         await markExtractionNeedsReview(supabase, extraction.id);
@@ -128,10 +138,28 @@ export function buildOpportunityPayload(extraction, options = {}) {
     return insertPayload;
   }
 
+  const mergedSourceMessageIds = mergeDistinctValues(existingOpportunity.source_message_ids, sourceMessageIds);
+  const mergedSourceMsgIds = mergeDistinctValues(existingOpportunity.source_msg_ids, sourceMsgIds);
+  const existingRawSource = objectValue(existingOpportunity.raw_source);
+
   return {
     ...insertPayload,
+    received_date: earliestIso(existingOpportunity.received_date, receivedDate),
+    last_contact_at: latestIso(existingOpportunity.last_contact_at, lastContactAt),
     customer: existingOpportunity.customer || sourceCustomer,
     contact: existingOpportunity.contact || sourceContact,
+    source_message_ids: mergedSourceMessageIds,
+    source_msg_ids: mergedSourceMsgIds,
+    raw_source: {
+      ...insertPayload.raw_source,
+      merged_rfq_extraction_ids: mergeDistinctValues(
+        arrayValue(existingRawSource.merged_rfq_extraction_ids),
+        [existingOpportunity.source_rfq_extraction_id, extraction.id],
+      ),
+      merged_source_message_ids: mergedSourceMessageIds,
+      merged_source_msg_ids: mergedSourceMsgIds,
+      latest_rfq_extraction_id: extraction.id,
+    },
   };
 }
 
@@ -166,7 +194,16 @@ async function fetchCandidates(supabase, limit, minConfidence) {
   return data || [];
 }
 
-async function findExistingOpportunity(supabase, extractionId) {
+async function findExistingOpportunity(supabase, extraction, sourceMessages) {
+  const exactOpportunity = await findOpportunityBySourceExtraction(supabase, extraction.id);
+  if (exactOpportunity) {
+    return exactOpportunity;
+  }
+
+  return findRecentMatchingOpportunity(supabase, extraction, sourceMessages);
+}
+
+async function findOpportunityBySourceExtraction(supabase, extractionId) {
   const { data, error } = await supabase
     .from('opportunities')
     .select('*')
@@ -183,6 +220,31 @@ async function findExistingOpportunity(supabase, extractionId) {
   }
 
   return data?.[0] || null;
+}
+
+async function findRecentMatchingOpportunity(supabase, extraction, sourceMessages) {
+  const referenceAt = extractionReferenceAt(extraction, sourceMessages);
+  const windowStart = new Date(referenceAt.getTime() - RECENT_OPPORTUNITY_WINDOW_HOURS * 60 * 60 * 1000);
+  const windowEnd = new Date(referenceAt.getTime() + RECENT_OPPORTUNITY_WINDOW_HOURS * 60 * 60 * 1000);
+
+  const { data, error } = await supabase
+    .from('opportunities')
+    .select('*')
+    .eq('account_key', extraction.account_key)
+    .eq('chat_jid', extraction.chat_jid)
+    .in('status', ACTIVE_OPPORTUNITY_STATUSES)
+    .order('received_date', { ascending: false, nullsFirst: false })
+    .order('created_at', { ascending: false })
+    .limit(50);
+
+  if (error) {
+    throw new Error(`find recent matching opportunity failed: ${error.message}`);
+  }
+
+  const opportunities = Array.isArray(data) ? data : [];
+  return opportunities.find((opportunity) =>
+    isLikelySameOpportunity(opportunity, extraction, sourceMessages, windowStart, windowEnd),
+  ) || null;
 }
 
 async function fetchSourceMessages(supabase, sourceMessageIds) {
@@ -209,13 +271,17 @@ async function fetchSourceMessages(supabase, sourceMessageIds) {
 }
 
 async function insertOpportunity(supabase, opportunity) {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('opportunities')
-    .insert(opportunity);
+    .insert(opportunity)
+    .select('id')
+    .single();
 
   if (error) {
     throw new Error(`insert opportunity failed: ${error.message}`);
   }
+
+  return data.id;
 }
 
 async function updateOpportunity(supabase, opportunityId, opportunity) {
@@ -243,12 +309,88 @@ async function markExtractionNeedsReview(supabase, extractionId) {
   }
 }
 
+async function markExtractionPromoted(supabase, extractionId, opportunityId) {
+  const { error } = await supabase.rpc('mark_rfq_extraction_promoted', {
+    p_extraction_id: extractionId,
+    p_opportunity_id: opportunityId,
+  });
+
+  if (error) {
+    throw new Error(`mark extraction promoted failed: ${error.message}`);
+  }
+}
+
 function shouldMoveToNeedsReview(extraction, minConfidence) {
   return extraction.review_status === 'pending' && numberOrNull(extraction.confidence) >= minConfidence;
 }
 
 function opportunityId(extractionId) {
   return `RFQ-${String(extractionId).slice(0, 8).toUpperCase()}`;
+}
+
+function extractionReferenceAt(extraction, sourceMessages) {
+  const sourceDates = sourceMessages
+    .map((message) => timestampMs(message.message_at))
+    .filter((value) => value !== null);
+  const earliestSourceDate = sourceDates.length > 0 ? Math.min(...sourceDates) : null;
+  const extractionDate = timestampMs(extraction.created_at);
+  const fallback = extractionDate ?? Date.now();
+  return new Date(earliestSourceDate ?? fallback);
+}
+
+function isLikelySameOpportunity(opportunity, extraction, sourceMessages, windowStart, windowEnd) {
+  const opportunityAt = opportunityReferenceAt(opportunity);
+  if (!opportunityAt || opportunityAt < windowStart || opportunityAt > windowEnd) {
+    return false;
+  }
+
+  const extractionJson = objectValue(extraction.extracted_json);
+  const opportunityJson = objectValue(opportunity.raw_source?.extracted_json);
+
+  if (
+    arrayOverlap(arrayValue(opportunity.source_message_ids), arrayValue(extraction.source_message_ids))
+    || arrayOverlap(arrayValue(opportunity.source_msg_ids), arrayValue(extraction.source_msg_ids))
+  ) {
+    return true;
+  }
+
+  const originMatches = sameNormalizedText(extractionJson.origin, opportunityJson.origin);
+  const destinationMatches = sameNormalizedText(extractionJson.destination, opportunityJson.destination);
+  if (!originMatches || !destinationMatches) {
+    return false;
+  }
+
+  let signalCount = 0;
+
+  if (sameNormalizedNumber(extractionJson.container_count, opportunityJson.container_count)) {
+    signalCount += 1;
+  }
+
+  if (sameNormalizedText(extractionJson.commodity, opportunity.material_type, opportunityJson.commodity)) {
+    signalCount += 1;
+  }
+
+  if (sameNormalizedText(extractionJson.shipping_line, opportunityJson.shipping_line)) {
+    signalCount += 1;
+  }
+
+  if (sameNormalizedText(extractionJson.load_window, opportunityJson.load_window)) {
+    signalCount += 1;
+  }
+
+  if (sameNumericFingerprint(extractionJson.quoted_price, opportunityJson.quoted_price)) {
+    signalCount += 1;
+  }
+
+  return signalCount >= 2;
+}
+
+function opportunityReferenceAt(opportunity) {
+  const receivedAt = timestampMs(opportunity.received_date);
+  const createdAt = timestampMs(opportunity.created_at);
+  const fallback = timestampMs(opportunity.updated_at);
+  const ms = receivedAt ?? createdAt ?? fallback;
+  return ms === null ? null : new Date(ms);
 }
 
 function opportunityTitle(extraction, extractedJson) {
@@ -333,9 +475,86 @@ function arrayValue(value) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
 }
 
+function arrayOverlap(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length === 0 || right.length === 0) {
+    return false;
+  }
+
+  const rightValues = new Set(right);
+  return left.some((value) => rightValues.has(value));
+}
+
+function mergeDistinctValues(left, right) {
+  return Array.from(new Set([
+    ...arrayValue(left),
+    ...arrayValue(right),
+  ]));
+}
+
 function numberOrNull(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function sameNormalizedNumber(left, right) {
+  const leftNumber = numberOrNull(left);
+  const rightNumber = numberOrNull(right);
+  if (leftNumber === null || rightNumber === null) return false;
+  return Math.floor(leftNumber) === Math.floor(rightNumber);
+}
+
+function sameNormalizedText(...values) {
+  const normalized = values
+    .map(normalizeText)
+    .filter(Boolean);
+
+  if (normalized.length < 2) return false;
+  return normalized.every((value) => value === normalized[0]);
+}
+
+function sameNumericFingerprint(left, right) {
+  const leftFingerprint = numericFingerprint(left);
+  const rightFingerprint = numericFingerprint(right);
+  if (!leftFingerprint || !rightFingerprint) return false;
+  return leftFingerprint === rightFingerprint;
+}
+
+function numericFingerprint(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : null;
+  }
+
+  if (typeof value === 'string') {
+    const matches = value.match(/-?\d+(?:\.\d+)?/g);
+    if (!matches || matches.length === 0) return null;
+    return Array.from(new Set(matches)).sort().join('|');
+  }
+
+  if (Array.isArray(value)) {
+    const nested = value
+      .map((item) => numericFingerprint(item))
+      .filter(Boolean);
+    return nested.length > 0 ? Array.from(new Set(nested)).sort().join('|') : null;
+  }
+
+  if (typeof value === 'object') {
+    const nested = Object.values(value)
+      .map((item) => numericFingerprint(item))
+      .filter(Boolean);
+    return nested.length > 0 ? Array.from(new Set(nested)).sort().join('|') : null;
+  }
+
+  return null;
+}
+
+function normalizeText(value) {
+  if (value === null || value === undefined) return null;
+  const normalized = String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  return normalized || null;
 }
 
 function timestampMs(value) {
@@ -343,6 +562,22 @@ function timestampMs(value) {
 
   const ms = new Date(value).getTime();
   return Number.isFinite(ms) ? ms : null;
+}
+
+function earliestIso(...values) {
+  const timestamps = values
+    .map(timestampMs)
+    .filter((value) => value !== null);
+  if (timestamps.length === 0) return null;
+  return new Date(Math.min(...timestamps)).toISOString();
+}
+
+function latestIso(...values) {
+  const timestamps = values
+    .map(timestampMs)
+    .filter((value) => value !== null);
+  if (timestamps.length === 0) return null;
+  return new Date(Math.max(...timestamps)).toISOString();
 }
 
 function isoOrNull(value) {
@@ -354,6 +589,14 @@ function boolEnv(name, fallback) {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
   return ['1', 'true', 'yes', 'on'].includes(String(raw).toLowerCase());
+}
+
+function intEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+
+  const number = Number(raw);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
